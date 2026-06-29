@@ -8,7 +8,7 @@ metadata:
     app.kubernetes.io/component: application
     app.kubernetes.io/part-of: observability
 spec:
-  type: ClusterIP
+  type: NodePort
   selector:
     app.kubernetes.io/name: inventory-service
   ports:
