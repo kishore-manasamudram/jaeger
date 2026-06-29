@@ -99,6 +99,8 @@ spec:
           volumeMounts:
             - name: tmp
               mountPath: /tmp
+      imagePullSecrets:
+        - name: dkrsecret
       volumes:
         - name: tmp
           emptyDir: {}
