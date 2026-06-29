@@ -53,7 +53,7 @@ spec:
               app.kubernetes.io/name: inventory-service
       containers:
         - name: inventory-service
-          image: "<your-inventory-ecr-image>"
+          image: "kishoreyuva50/springboot:inventory-svc-1"
           imagePullPolicy: IfNotPresent
           envFrom:
             - configMapRef:
