@@ -1,9 +1,0 @@
-apiVersion: v1
-kind: Pod
-metadata:
-  name: imagepull-error-pod
-spec:
-  containers:
-    - name: app
-      image: this-image-does-not-exist:latest   # ❌ ImagePullBackOff
-

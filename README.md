@@ -1,253 +1,278 @@
+# EKS Jaeger Observability Stack
 
+This repository contains a production-style distributed tracing setup for AWS EKS using:
 
-# 🚀 Production-Grade Kubernetes Setup on Amazon EKS
+- Jaeger as the trace backend and UI
+- OpenTelemetry Collector as the trace collector and gateway
+- self-hosted Elasticsearch on EKS as Jaeger storage
+- Amazon EBS for Elasticsearch persistence
+- AWS ALB ingress for external access
+- two Go microservices instrumented with OpenTelemetry
 
-This guide walks you step-by-step through creating a **Production-Ready Amazon EKS Cluster** using `eksctl`.
+## Current Architecture
 
-Official AWS Documentation:
-[https://docs.aws.amazon.com/eks/latest/userguide/getting-started-eksctl.html](https://docs.aws.amazon.com/eks/latest/userguide/getting-started-eksctl.html)
+The active application is now split into 2 microservices:
 
----
+1. `checkout-service`
+   Public service behind ALB ingress.
+2. `inventory-service`
+   Internal service called by `checkout-service`.
 
-# 📌 Architecture Overview
+Current trace flow:
 
+1. browser -> `checkout-service`
+2. `checkout-service` -> `inventory-service`
+3. both services -> OpenTelemetry Collector
+4. OpenTelemetry Collector -> Jaeger
+5. Jaeger -> Elasticsearch -> EBS
+
+## What This Repo Includes
+
+- `manifests/base`
+  Namespace manifest.
+
+- `manifests/elasticsearch`
+  Self-hosted Elasticsearch StatefulSet, Service, PDB, and EBS StorageClass.
+
+- `helm/jaeger-values.yaml`
+  Production-style Jaeger Helm values for `collector`, `query`, and `agent`.
+
+- `manifests/otel-collector`
+  OpenTelemetry Collector deployment, RBAC, service, HPA, and config.
+
+- `manifests/app`
+  Kubernetes manifests for both microservices.
+
+- `manifests/ingress`
+  ALB ingress that exposes Jaeger UI and `checkout-service`.
+
+- `app`
+  Two Go services plus shared observability helpers.
+
+- `deploy.md`
+  Full step-by-step deployment and testing guide.
+
+## Current Layout
+
+```text
+eks-jaeger-observability/
+|-- README.md
+|-- deploy.md
+|-- helm/
+|   `-- jaeger-values.yaml
+|-- app/
+|   |-- .dockerignore
+|   |-- go.mod
+|   |-- README.md
+|   |-- checkout-service/
+|   |   |-- Dockerfile
+|   |   |-- go.mod
+|   |   `-- main.go
+|   |-- inventory-service/
+|   |   |-- Dockerfile
+|   |   |-- go.mod
+|   |   `-- main.go
+|   `-- internal/
+|       `-- observability/
+|           |-- README.md
+|           `-- telemetry.go
+`-- manifests/
+    |-- base/
+    |   `-- namespace.yaml
+    |-- elasticsearch/
+    |   |-- headless-service.yaml
+    |   |-- pdb.yaml
+    |   |-- service.yaml
+    |   |-- statefulset.yaml
+    |   `-- storageclass.yaml
+    |-- ingress/
+    |   `-- ingress.yaml
+    |-- jaeger/
+    |   `-- grafana-datasource.yaml
+    |-- otel-collector/
+    |   |-- clusterrole.yaml
+    |   |-- clusterrolebinding.yaml
+    |   |-- configmap.yaml
+    |   |-- deployment.yaml
+    |   |-- hpa.yaml
+    |   |-- pdb.yaml
+    |   |-- service.yaml
+    |   `-- serviceaccount.yaml
+    `-- app/
+        |-- checkout-service-configmap.yaml
+        |-- checkout-service-deployment.yaml
+        |-- checkout-service-hpa.yaml
+        |-- checkout-service-pdb.yaml
+        |-- checkout-service-service.yaml
+        |-- inventory-service-configmap.yaml
+        |-- inventory-service-deployment.yaml
+        |-- inventory-service-hpa.yaml
+        |-- inventory-service-pdb.yaml
+        |-- inventory-service-service.yaml
+        `-- microservices-serviceaccount.yaml
 ```
-AWS
- ├── VPC
- ├── EKS Control Plane
- ├── Managed Node Group (Auto Scaling 2–10)
- ├── Cluster Autoscaler
- ├── EBS CSI Driver
- └── IAM OIDC Provider
-```
 
----
-
-# 📌 Pre-Requisites
+## Prerequisites
 
 You need:
 
-* Amazon Linux 2 EC2 instance (recommended t3.medium or higher)
-* AWS CLI installed & configured
-* IAM Role attached to EC2 with:
+- one working EKS cluster
+- `kubectl` connected to the cluster
+- `helm`
+- Docker
+- AWS CLI configured
+- AWS Load Balancer Controller already installed
+- Amazon EBS CSI driver already installed
+- one ACM certificate in `ISSUED` state
+- two ECR repositories for the app images
+- DNS access for your domain
 
-Required Policies:
+## Deployment Order
 
-* AmazonEKSClusterPolicy
-* AmazonEC2FullAccess
-* AmazonVPCFullAccess
-* AWSCloudFormationFullAccess
-* IAMFullAccess
+Deploy in this order:
 
-Verify AWS:
+1. create namespace
+2. deploy Elasticsearch
+3. install Jaeger with Helm
+4. deploy OpenTelemetry Collector
+5. build and push both microservice images
+6. update image names and ingress placeholders
+7. deploy app manifests
+8. deploy ingress
+9. point DNS to the ALB
+10. test app, logs, and traces
+
+Use [deploy.md](c:\Users\Yaswanth Reddy\OneDrive - vitap.ac.in\Desktop\Distributed Tracing with Jaeger\eks-jaeger-observability\deploy.md) for the full detailed steps.
+
+## Main Commands
+
+Create the namespace:
 
 ```bash
-aws sts get-caller-identity
+kubectl apply -f manifests/base/namespace.yaml
 ```
 
----
-
-# STEP 1 — Install kubectl
+Deploy Elasticsearch:
 
 ```bash
-curl -LO "https://dl.k8s.io/release/$(curl -Ls https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
-chmod +x kubectl
-sudo mv kubectl /usr/local/bin/
-kubectl version --client
+kubectl apply -f manifests/elasticsearch/storageclass.yaml
+kubectl apply -f manifests/elasticsearch/headless-service.yaml
+kubectl apply -f manifests/elasticsearch/service.yaml
+kubectl apply -f manifests/elasticsearch/pdb.yaml
+kubectl apply -f manifests/elasticsearch/statefulset.yaml
 ```
 
----
-
-# STEP 2 — Install eksctl
+Install Jaeger:
 
 ```bash
-curl --silent --location \
-"https://github.com/weaveworks/eksctl/releases/latest/download/eksctl_$(uname -s)_amd64.tar.gz" \
-| tar xz -C /tmp
-
-sudo mv /tmp/eksctl /usr/local/bin
-eksctl version
-```
-
----
-
-# STEP 3 — Install Helm (Required for Autoscaler)
-
-```bash
-curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
-helm version
-```
-
----
-
-# STEP 4 — Create Production EKS Cluster
-
-### ⚡ Recommended Instance Type
-
-| Use Case             | Instance  |
-| -------------------- | --------- |
-| Dev                  | t3.large  |
-| Small Production     | m5.large  |
-| Medium Production    | m5.xlarge |
-| AI / Heavy Workloads | c5.xlarge |
-
----
-
-## 🚀 Create Cluster (Production Command)
-
-```bash
-eksctl create cluster \
-  --name my-cluster \
-  --region us-east-1 \
-  --version 1.34 \
-  --nodegroup-name my-nodegroup \
-  --node-type m5.large \
-  --nodes 2 \
-  --nodes-min 2 \
-  --nodes-max 10 \
-  --managed \
-  --with-oidc \
-  --asg-access \
-  --external-dns-access \
-  --full-ecr-access \
-  --appmesh-access
-```
-
----
-
-## 🔹 What This Command Does
-
-* Creates VPC automatically
-* Creates EKS control plane
-* Creates managed node group
-* Enables IAM OIDC
-* Enables Auto Scaling Group permissions
-* Sets scaling range (2–10 nodes)
-* Production-ready IAM setup
-
-⏳ Wait 15–20 minutes.
-
----
-
-# STEP 5 — Configure kubectl
-
-```bash
-aws eks --region us-east-1 update-kubeconfig --name my-cluster
-kubectl get nodes
-```
-
-You should see 2 nodes in `Ready` state.
-
----
-
-# STEP 6 — Install Amazon EBS CSI Driver (IMPORTANT)
-
-Required for dynamic PVC storage.
-
-```bash
-
-eksctl create addon \
-  --name aws-ebs-csi-driver \
-  --cluster my-cluster \
-  --region us-east-1 \
-  --force
-
-```
-
-Verify:
-
-```bash
-kubectl get pods -n kube-system | grep ebs
-```
-
----
-
-# STEP 7 — Install Cluster Autoscaler (Scaling Fix)
-
-⚠️ Without this, cluster will NOT scale.
-
----
-
-### Add Helm Repo
-
-```bash
-helm repo add autoscaler https://kubernetes.github.io/autoscaler
+helm repo add jaegertracing https://jaegertracing.github.io/helm-charts
 helm repo update
+helm upgrade --install jaeger jaegertracing/jaeger \
+  --namespace observability \
+  --version 3.4.1 \
+  -f helm/jaeger-values.yaml
 ```
 
----
-
-### Install Autoscaler
+Deploy OpenTelemetry Collector:
 
 ```bash
-helm install cluster-autoscaler autoscaler/cluster-autoscaler \
-  -n kube-system \
-  --set autoDiscovery.clusterName=my-cluster \
-  --set awsRegion=us-east-1 \
-  --set rbac.create=true \
-  --set image.tag=v1.29.0
+kubectl apply -f manifests/otel-collector/
 ```
 
----
-
-### Verify Autoscaler
+Deploy the microservices:
 
 ```bash
-kubectl get pods -n kube-system | grep autoscaler
+kubectl apply -f manifests/app/
 ```
 
-Check logs:
+Deploy ingress:
 
 ```bash
-kubectl logs -n kube-system -l app.kubernetes.io/name=aws-cluster-autoscaler
-
+kubectl apply -f manifests/ingress/ingress.yaml
 ```
 
-You should see:
+## Build The Two App Images
 
-```
-Successfully discovered ASG
-```
----
-
-# STEP 9 — Verify Auto Scaling Group
-
-Go to:
-
-AWS Console → EC2 → Auto Scaling Groups
-
-You will see:
-
-```
-eksctl-my-cluster-nodegroup-xxxx
-```
-
-Check:
-
-* Min = 2
-* Desired = 2
-* Max = 10
-
----
-
-# 🧹 DELETE Cluster (Cleanup)
-
-⚠️ This deletes EVERYTHING.
+Build and push `checkout-service`:
 
 ```bash
-eksctl delete cluster \
-  --name my-cluster \
-  --region us-east-1
+cd app/checkout-service
+docker build -t <your-checkout-ecr-image> .
+docker push <your-checkout-ecr-image>
+cd ../..
 ```
 
-Deletes:
+Build and push `inventory-service`:
 
-* EKS Control Plane
-* Node Groups
-* VPC
-* Load Balancers
-* Security Groups
-* CloudFormation stacks
+```bash
+cd app/inventory-service
+docker build -t <your-inventory-ecr-image> .
+docker push <your-inventory-ecr-image>
+cd ../..
+```
 
----
+Before you deploy the app manifests, update:
 
+- `manifests/app/checkout-service-deployment.yaml`
+- `manifests/app/inventory-service-deployment.yaml`
+- `manifests/ingress/ingress.yaml`
+
+## Verification Commands
+
+Check core workloads:
+
+```bash
+kubectl -n observability get pods
+kubectl -n observability get svc
+kubectl -n observability get hpa
+kubectl -n observability get ingress
+```
+
+Check app rollouts:
+
+```bash
+kubectl -n observability rollout status deployment/checkout-service
+kubectl -n observability rollout status deployment/inventory-service
+kubectl -n observability rollout status deployment/otel-collector
+```
+
+Check app logs:
+
+```bash
+kubectl -n observability logs deployment/checkout-service
+kubectl -n observability logs deployment/inventory-service
+kubectl -n observability logs deployment/otel-collector
+```
+
+## Optional Files
+
+- `manifests/jaeger/grafana-datasource.yaml`
+  Use this only if your Grafana setup supports datasource sidecar loading.
+
+## Production Notes
+
+- all application traffic inside the cluster uses `ClusterIP` services
+- ingress exposes only Jaeger UI and `checkout-service`
+- Jaeger stores traces in self-hosted Elasticsearch
+- Elasticsearch persists data on EBS volumes
+- both microservices use structured JSON logs
+- both microservices export traces to OTel Collector by OTLP HTTP
+
+## CI/CD Hints
+
+- run YAML linting before deployment
+- validate Kubernetes manifests with `kubeconform`
+- keep image tags immutable
+- render the Jaeger chart in CI with `helm template`
+- add a smoke test that hits `/work` and checks Jaeger for traces
+
+## Important Notes
+
+- this repo does not use OpenSearch now
+- this repo does not require IAM role annotations for the current app flow
+- the active app code is no longer a single service
+- the active services are:
+  - `app/checkout-service`
+  - `app/inventory-service`
+
+For the app code details, read [app/README.md](c:\Users\Yaswanth Reddy\OneDrive - vitap.ac.in\Desktop\Distributed Tracing with Jaeger\eks-jaeger-observability\app\README.md).
